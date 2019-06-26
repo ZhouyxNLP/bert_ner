@@ -3,20 +3,23 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils import data
 from model import Net
-from data_load import NerDataset, pad, VOCAB, tokenizer, tag2idx, idx2tag
+from trigger_data_load import TriggerDataset, pad, VOCAB, tokenizer, tag2idx, idx2tag
 import os
 import numpy as np
 import argparse
+
+from telegram import telegram_send, telegram_send_measure
+
 
 def train(model, iterator, optimizer, criterion):
     model.train()
     for i, batch in enumerate(iterator):
         words, x, is_heads, tags, y, seqlens = batch
-        _y = y # for monitoring
+        _y = y  # for monitoring
         optimizer.zero_grad()
-        logits, y, _ = model(x, y) # logits: (N, T, VOCAB), y: (N, T)
+        logits, y, _ = model(x, y)  # logits: (N, T, VOCAB), y: (N, T)
 
-        logits = logits.view(-1, logits.shape[-1]) # (N*T, VOCAB)
+        logits = logits.view(-1, logits.shape[-1])  # (N*T, VOCAB)
         y = y.view(-1)  # (N*T,)
 
         loss = criterion(logits, y)
@@ -24,7 +27,7 @@ def train(model, iterator, optimizer, criterion):
 
         optimizer.step()
 
-        if i==0:
+        if i == 0:
             print("=====sanity check======")
             print("words:", words[0])
             print("x:", x.cpu().numpy()[0][:seqlens[0]])
@@ -35,11 +38,11 @@ def train(model, iterator, optimizer, criterion):
             print("seqlen:", seqlens[0])
             print("=======================")
 
-
-        if i%10==0: # monitoring
+        if i % 10 == 0:  # monitoring
             print(f"step: {i}, loss: {loss.item()}")
 
-def eval(model, iterator, f):
+
+def eval(model, iterator, f, identification=False):
     model.eval()
 
     Words, Is_heads, Tags, Y, Y_hat = [], [], [], [], []
@@ -60,18 +63,29 @@ def eval(model, iterator, f):
         for words, is_heads, tags, y_hat in zip(Words, Is_heads, Tags, Y_hat):
             y_hat = [hat for head, hat in zip(is_heads, y_hat) if head == 1]
             preds = [idx2tag[hat] for hat in y_hat]
-            assert len(preds)==len(words.split())==len(tags.split())
+            # print('preds :', preds)
+            # print('words :', words)
+            # print('tags :', tags)
+            # assert len(preds)==len(words.split())==len(tags.split())
             for w, t, p in zip(words.split()[1:-1], tags.split()[1:-1], preds[1:-1]):
                 fout.write(f"{w} {t} {p}\n")
             fout.write("\n")
 
     ## calc metric
-    y_true =  np.array([tag2idx[line.split()[1]] for line in open("temp", 'r').read().splitlines() if len(line) > 0])
-    y_pred =  np.array([tag2idx[line.split()[2]] for line in open("temp", 'r').read().splitlines() if len(line) > 0])
+    y_true = np.array([tag2idx[line.split()[1]] for line in open("temp", 'r').read().splitlines() if len(line) > 0])
+    y_pred = np.array([tag2idx[line.split()[2]] for line in open("temp", 'r').read().splitlines() if len(line) > 0])
 
-    num_proposed = len(y_pred[y_pred>1])
-    num_correct = (np.logical_and(y_true==y_pred, y_true>1)).astype(np.int).sum()
-    num_gold = len(y_true[y_true>1])
+    if identification:
+        print('identification mode!')
+        y_true = list(map(lambda x: 2 if x >= 2 else x, y_true))
+        y_pred = list(map(lambda x: 2 if x >= 2 else x, y_pred))
+
+        y_true = np.array(y_true)
+        y_pred = np.array(y_pred)
+
+    num_proposed = len(y_pred[y_pred > 1])
+    num_correct = (np.logical_and(y_true == y_pred, y_true > 1)).astype(np.int).sum()
+    num_gold = len(y_true[y_true > 1])
 
     print(f"num_proposed:{num_proposed}")
     print(f"num_correct:{num_correct}")
@@ -87,14 +101,14 @@ def eval(model, iterator, f):
         recall = 1.0
 
     try:
-        f1 = 2*precision*recall / (precision + recall)
+        f1 = 2 * precision * recall / (precision + recall)
     except ZeroDivisionError:
-        if precision*recall==0:
-            f1=1.0
+        if precision * recall == 0:
+            f1 = 1.0
         else:
-            f1=0
+            f1 = 0
 
-    final = f + ".P%.2f_R%.2f_F%.2f" %(precision, recall, f1)
+    final = f + ".P%.2f_R%.2f_F%.2f" % (precision, recall, f1)
     with open(final, 'w') as fout:
         result = open("temp", "r").read()
         fout.write(f"{result}\n")
@@ -105,12 +119,13 @@ def eval(model, iterator, f):
 
     os.remove("temp")
 
-    print("precision=%.2f"%precision)
-    print("recall=%.2f"%recall)
-    print("f1=%.2f"%f1)
+    print("precision=%.3f" % precision)
+    print("recall=%.3f" % recall)
+    print("f1=%.3f" % f1)
     return precision, recall, f1
 
-if __name__=="__main__":
+
+if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--lr", type=float, default=0.0001)
@@ -118,8 +133,10 @@ if __name__=="__main__":
     parser.add_argument("--finetuning", dest="finetuning", action="store_true")
     parser.add_argument("--top_rnns", dest="top_rnns", action="store_true")
     parser.add_argument("--logdir", type=str, default="checkpoints/01")
-    parser.add_argument("--trainset", type=str, default="conll2003/train.txt")
-    parser.add_argument("--validset", type=str, default="conll2003/valid.txt")
+    parser.add_argument("--trainset", type=str, default="event/train.json")
+    parser.add_argument("--validset", type=str, default="event/dev.json")
+    parser.add_argument("--testset", type=str, default="event/test.json")
+
     hp = parser.parse_args()
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -127,11 +144,9 @@ if __name__=="__main__":
     model = Net(hp.top_rnns, len(VOCAB), device, hp.finetuning).cuda()
     model = nn.DataParallel(model)
 
-    # train_dataset = TriggerDataset(hp.trainset)
-    # eval_dataset = TriggerDataset(hp.validset)
-
-    train_dataset = NerDataset(hp.trainset)
-    eval_dataset = NerDataset(hp.validset)
+    train_dataset = TriggerDataset(hp.trainset)
+    eval_dataset = TriggerDataset(hp.validset)
+    test_dataset = TriggerDataset(hp.testset)
 
     train_iter = data.DataLoader(dataset=train_dataset,
                                  batch_size=hp.batch_size,
@@ -139,15 +154,20 @@ if __name__=="__main__":
                                  num_workers=4,
                                  collate_fn=pad)
     eval_iter = data.DataLoader(dataset=eval_dataset,
-                                 batch_size=hp.batch_size,
-                                 shuffle=False,
-                                 num_workers=4,
-                                 collate_fn=pad)
+                                batch_size=hp.batch_size,
+                                shuffle=False,
+                                num_workers=4,
+                                collate_fn=pad)
+    test_iter = data.DataLoader(dataset=test_dataset,
+                                batch_size=hp.batch_size,
+                                shuffle=False,
+                                num_workers=4,
+                                collate_fn=pad)
 
-    optimizer = optim.Adam(model.parameters(), lr = hp.lr)
+    optimizer = optim.Adam(model.parameters(), lr=hp.lr)
     criterion = nn.CrossEntropyLoss(ignore_index=0)
 
-    for epoch in range(1, hp.n_epochs+1):
+    for epoch in range(1, hp.n_epochs + 1):
         train(model, train_iter, optimizer, criterion)
 
         print(f"=========eval at epoch={epoch}=========")
@@ -155,6 +175,16 @@ if __name__=="__main__":
         fname = os.path.join(hp.logdir, str(epoch))
         precision, recall, f1 = eval(model, eval_iter, fname)
 
+        telegram_send('[epoch={}]'.format(epoch))
+        telegram_send_measure('dev trigger classification', precision, recall, f1)
+        precision, recall, f1 = eval(model, eval_iter, fname, identification=True)
+        telegram_send_measure('dev trigger identification', precision, recall, f1)
+
         torch.save(model.state_dict(), f"{fname}.pt")
         print(f"weights were saved to {fname}.pt")
 
+        print(f"test eval")
+        precision, recall, f1 = eval(model, test_iter, fname)
+        telegram_send_measure('test trigger classification', precision, recall, f1)
+        precision, recall, f1 = eval(model, test_iter, fname, identification=True)
+        telegram_send_measure('test trigger identification', precision, recall, f1)

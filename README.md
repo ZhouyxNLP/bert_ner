@@ -26,7 +26,7 @@ python train.py --logdir checkpoints/feature --batch_size 128 --top_rnns --lr 1e
 
 * STEP 2b. Run the command if you want to do the fine-tuning approach.
 ```
-python train.py --logdir checkpoints/finetuning --finetuning --batch_size 32 --lr 5e-5 --n_epochs 3
+python trigger_train.py --logdir checkpoints/0627 --finetuning --batch_size 16 --lr 3e-5 --n_epochs 15
 ```
 
 ## Results in the paper
